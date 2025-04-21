@@ -197,12 +197,12 @@ for ($X = 1; $X -le $RunTimes; $X++) {
     if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Start Loop: $X"}
     # Start both commands as jobs
     $cpuJob = Start-Job -ScriptBlock { 
-        $cpuCounter = Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval $using:CollectEveryXSeconds
+        $cpuCounter = Get-Counter '\238(_Total)\6' -SampleInterval $using:CollectEveryXSeconds
         return $cpuCounter.CounterSamples.CookedValue
     }
 
     $diskJob = Start-Job -ScriptBlock { 
-        $diskCounter = Get-Counter '\PhysicalDisk(_Total)\% Disk Time' -SampleInterval $using:CollectEveryXSeconds
+        $diskCounter = Get-Counter '\234(_Total)\200' -SampleInterval $using:CollectEveryXSeconds
         return $diskCounter.CounterSamples.CookedValue
     }
 

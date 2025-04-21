@@ -6,7 +6,7 @@ Documentation available here: https://docs.hetrixtools.com/category/server-monit
 
 #### Version 2.0.6: 
 
-- Development branch
+- Fixed CPU reading on non-English Windows versions
 
 #### Version 2.0.5: 
 
