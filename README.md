@@ -4,6 +4,14 @@ Documentation available here: https://docs.hetrixtools.com/category/server-monit
 
 ### Changelog
 
+#### Version 2.0.7: 
+
+- Added the `update.ps1` script for an easier way to upgrade your agent
+- General improvements and optimizations on how CPU metrics are collected
+- Further improvements on the CPU reading of non-English Windows versions
+- Fixed an issue introduced in `v2.0.6` where CPU disk time wasn't read properly
+- Other minor improvements
+
 #### Version 2.0.6: 
 
 - Fixed CPU reading on non-English Windows versions

@@ -1,6 +1,6 @@
 #
 #	HetrixTools Server Monitoring Agent - Install Script
-#	Copyright 2015 - 2024 @  HetrixTools
+#	Copyright 2015 - 2025 @  HetrixTools
 #	For support, please open a ticket on our website https://hetrixtools.com
 #
 #
@@ -48,7 +48,7 @@ if ([System.Environment]::OSVersion.Version.Build -lt 17763 -and [Net.ServicePoi
 # Find and uninstall v1 agent
 Write-Host "Checking for old agent..."
 $processName = "HetrixToolsAgent.exe"
-$processes = Get-WmiObject Win32_Process | Where-Object { $_.Name -eq $processName }
+$processes = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq $processName }
 $paths = @()
 if ($processes) {
     foreach ($process in $processes) {
@@ -155,7 +155,7 @@ if ($existingTask) {
     }
     foreach ($process in $processes) {
         try {
-            $cmdLine = (Get-WmiObject Win32_Process -Filter "ProcessId = $($process.Id)").CommandLine
+            $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)").CommandLine
             if ($cmdLine -like "*$scriptName*") {
                 Write-Host "Found process $($process.Id)"
                 try {
