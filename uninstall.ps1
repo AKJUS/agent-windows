@@ -1,6 +1,6 @@
 #
 #	HetrixTools Server Monitoring Agent - Uninstall Script
-#	Copyright 2015 - 2024 @  HetrixTools
+#	Copyright 2015 - 2025 @  HetrixTools
 #	For support, please open a ticket on our website https://hetrixtools.com
 #
 #
@@ -59,7 +59,7 @@ if ($existingTask) {
     }
     foreach ($process in $processes) {
         try {
-            $cmdLine = (Get-WmiObject Win32_Process -Filter "ProcessId = $($process.Id)").CommandLine
+            $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)").CommandLine
             if ($cmdLine -like "*$scriptName*") {
                 Write-Host "Found process $($process.Id)"
                 try {

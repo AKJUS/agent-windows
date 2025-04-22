@@ -20,7 +20,7 @@
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Agent Version (do not change)
-$Version = "2.0.6"
+$Version = "2.0.7"
 
 # Load configuration file
 $ConfigFile = "$ScriptPath\hetrixtools.cfg"
@@ -93,6 +93,76 @@ function Check-ProcessOrService {
     }
 }
 
+function Get-PerflibCounterNames {
+    param (
+        [int[]]$Ids
+    )
+
+    $perflibBase = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib'
+    $allKeys = Get-ChildItem -Path $perflibBase |
+        Where-Object { $_.PSChildName -match '^(?:[0-9a-fA-F]{3,4}|CurrentLanguage)$' } |
+        Select-Object -ExpandProperty PSChildName
+
+    $preferred = @($allKeys | Where-Object { $_ -ne '009' })
+
+    if ($preferred.Count -gt 1 -and $preferred -contains 'CurrentLanguage') {
+        $activeLcid = 'CurrentLanguage'
+    } elseif ($preferred.Count -gt 0) {
+        $activeLcid = $preferred[0]
+    } elseif ($allKeys -contains '009') {
+        $activeLcid = '009'
+    } else {
+        if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') No valid Perflib subkeys found."}
+        Write-Warning "No valid Perflib subkeys found."
+        return @{}
+    }
+
+    $counterPath = Join-Path $perflibBase $activeLcid
+    try {
+        $counters = (Get-ItemProperty -Path $counterPath -Name Counter).Counter
+    } catch {
+        if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Could not read Counter from $counterPath"}
+        Write-Warning "Could not read Counter from $counterPath"
+        return @{}
+    }
+
+    $result = @{}
+
+    foreach ($id in $Ids) {
+        for ($i = 0; $i -lt $counters.Length; $i += 2) {
+            if ($counters[$i] -eq $id.ToString()) {
+                $result[$id] = $counters[$i + 1]
+                break
+            }
+        }
+
+        if (-not $result.ContainsKey($id)) {
+            $result[$id] = $null
+        }
+    }
+
+    return $result
+}
+
+function Wait-ForJobOutput {
+    param(
+        [System.Management.Automation.Job]$Job,
+        [int]$TimeoutSeconds = 10
+    )
+
+    $elapsed = 0
+    while ($elapsed -lt $TimeoutSeconds) {
+        $result = Receive-Job -Job $Job
+        if ($result) {
+            return ,$result
+        }
+        Start-Sleep -Milliseconds 200
+        $elapsed += 0.2
+    }
+
+    return $null
+}
+
 # Configs
 $SID = Get-ConfigValue -Key "SID"
 $CollectEveryXSeconds = Get-ConfigValue -Key "CollectEveryXSeconds"
@@ -129,6 +199,13 @@ if ((Get-Date).Hour -eq 0 -and (Get-Date).Minute -eq 0) {
         if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Debug log cleared."}
     }
 }
+
+# Get CounterNames
+$CounterNames = Get-PerflibCounterNames -Ids @(238, 6, 234, 200)
+if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') CounterName: $($CounterNames[238])"}
+if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') CounterName: $($CounterNames[6])"}
+if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') CounterName: $($CounterNames[234])"}
+if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') CounterName: $($CounterNames[200])"}
 
 # Network interfaces
 if (-not [string]::IsNullOrEmpty($NetworkInterfaces)) {
@@ -192,37 +269,39 @@ if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-
 $total_cpuUsage = 0
 $total_diskTime = 0
 
+# Start persistent CPU job
+$cpuJob = Start-Job -ScriptBlock {
+    param($CounterNames, $SampleCount)
+    while ($true) {
+        $cpuCounter = Get-Counter "\$($CounterNames[238])(_Total)\$($CounterNames[6])" -SampleInterval 1 -MaxSamples $SampleCount
+        $cpuAvg = ($cpuCounter.CounterSamples | Select-Object -ExpandProperty CookedValue | Measure-Object -Average).Average
+        Write-Output $cpuAvg
+    }
+} -ArgumentList $CounterNames, $CollectEveryXSeconds
+
+# Start persistent Disk job
+$diskJob = Start-Job -ScriptBlock {
+    param($CounterNames, $SampleCount)
+    while ($true) {
+        $diskCounter = Get-Counter "\$($CounterNames[234])(_Total)\$($CounterNames[200])" -SampleInterval 1 -MaxSamples $SampleCount
+        $diskAvg = ($diskCounter.CounterSamples | Select-Object -ExpandProperty CookedValue | Measure-Object -Average).Average
+        Write-Output $diskAvg
+    }
+} -ArgumentList $CounterNames, $CollectEveryXSeconds
+
 # Collect data loop
 for ($X = 1; $X -le $RunTimes; $X++) {
     if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Start Loop: $X"}
-    # Start both commands as jobs
-    $cpuJob = Start-Job -ScriptBlock { 
-        $cpuCounter = Get-Counter '\238(_Total)\6' -SampleInterval $using:CollectEveryXSeconds
-        return $cpuCounter.CounterSamples.CookedValue
-    }
 
-    $diskJob = Start-Job -ScriptBlock { 
-        $diskCounter = Get-Counter '\234(_Total)\200' -SampleInterval $using:CollectEveryXSeconds
-        return $diskCounter.CounterSamples.CookedValue
-    }
-
-    # Wait for both jobs to complete
-    $cpuJob | Wait-Job
-    $diskJob | Wait-Job
-
-    # Retrieve results and process them
-    $cpuUsage = Receive-Job -Job $cpuJob
-    $diskTime = Receive-Job -Job $diskJob
+    # Retrieve CPU and Disk usage
+    $cpuUsage = Wait-ForJobOutput -Job $cpuJob
+    $diskTime = Wait-ForJobOutput -Job $diskJob
 
     if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') CPU Usage: $cpuUsage - Disk Time: $diskTime"}
 
     # Add up the results
     $total_cpuUsage += [math]::Round($cpuUsage, 2)
     $total_diskTime += [math]::Round($diskTime, 2)
-
-    # Clean up jobs
-    Remove-Job -Job $cpuJob
-    Remove-Job -Job $diskJob
 
     # Check if the minute has changed, so we can end the loop
     $MM = [int](Get-Date -Format 'mm')
@@ -239,6 +318,10 @@ for ($X = 1; $X -le $RunTimes; $X++) {
     }
     if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') End Loop: $X"}
 }
+
+# Stop and remove the jobs
+Stop-Job $cpuJob, $diskJob
+Remove-Job $cpuJob, $diskJob
 
 # Get Win32_OperatingSystem
 $Win32_OperatingSystem = Get-CimInstance -ClassName Win32_OperatingSystem
