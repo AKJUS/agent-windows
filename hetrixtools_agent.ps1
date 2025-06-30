@@ -20,7 +20,7 @@
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Agent Version (do not change)
-$Version = "2.0.7"
+$Version = "2.0.8"
 
 # Load configuration file
 $ConfigFile = "$ScriptPath\hetrixtools.cfg"
@@ -163,6 +163,51 @@ function Wait-ForJobOutput {
     return $null
 }
 
+# Retrieve current byte counters for a network adapter, trying multiple
+# providers when Get-NetAdapterStatistics is unavailable.
+function Get-NicBytes {
+    param(
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    try {
+        $stat = Get-NetAdapterStatistics -Name $Name -ErrorAction Stop
+        return [pscustomobject]@{ RX = [int64]$stat.ReceivedBytes; TX = [int64]$stat.SentBytes }
+    } catch {
+        try {
+            $nic = Get-NetAdapter -Name $Name -ErrorAction Stop
+            $normTarget = ($nic.InterfaceDescription -replace '[^A-Za-z0-9]', '').ToUpper()
+            $raw = Get-CimInstance -ClassName Win32_PerfRawData_Tcpip_NetworkInterface |
+                Where-Object {
+                    $curr = ($_.Name -replace '[^A-Za-z0-9]', '').ToUpper()
+                    $curr -eq $normTarget -or $_.Name -like "*$($nic.InterfaceDescription)*" -or $_.Name -like "*$Name*"
+                } | Select-Object -First 1
+            if ($raw) {
+                $rx = $raw.PSObject.Properties['BytesReceivedPerSec'].Value
+                if ($rx -eq $null) { $rx = $raw.PSObject.Properties['BytesReceivedPersec'].Value }
+                $tx = $raw.PSObject.Properties['BytesSentPerSec'].Value
+                if ($tx -eq $null) { $tx = $raw.PSObject.Properties['BytesSentPersec'].Value }
+                if ($rx -ne $null -and $tx -ne $null) {
+                    return [pscustomobject]@{ RX = [int64]$rx; TX = [int64]$tx }
+                }
+            }
+        } catch {
+            try {
+                $counterBase = "\\Network Interface($Name)"
+                $c = Get-Counter -Counter @("$counterBase\\Bytes Received/sec", "$counterBase\\Bytes Sent/sec") -ErrorAction Stop
+                $rx = ($c.CounterSamples | Where-Object { $_.Path -like '*Bytes Received/sec' }).RawValue
+                $tx = ($c.CounterSamples | Where-Object { $_.Path -like '*Bytes Sent/sec' }).RawValue
+                if ($rx -ne $null -and $tx -ne $null) {
+                    return [pscustomobject]@{ RX = [int64]$rx; TX = [int64]$tx }
+                }
+            } catch {
+            }
+        }
+    }
+
+    return [pscustomobject]@{ RX = $null; TX = $null }
+}
+
 # Configs
 $SID = Get-ConfigValue -Key "SID"
 $CollectEveryXSeconds = Get-ConfigValue -Key "CollectEveryXSeconds"
@@ -223,22 +268,19 @@ if (-not [string]::IsNullOrEmpty($NetworkInterfaces)) {
 if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Network Interfaces: $($NetworkInterfacesArray -join ', ')"}
 
 # Initial network usage
-$networkStats = Get-NetAdapterStatistics
 $aRX = @{}
 $aTX = @{}
 
 # Loop through network interfaces
 foreach ($NIC in $NetworkInterfacesArray) {
-     # Get the latest network stats for the NIC
     try {
-        $adapterStats = $networkStats | Where-Object { $_.Name -eq $NIC }
-        if ($adapterStats) {
-            $aRX[$NIC] = $adapterStats.ReceivedBytes
-            $aTX[$NIC] = $adapterStats.SentBytes
+        $stats = Get-NicBytes -Name $NIC
+        if ($stats.RX -ne $null) {
+            $aRX[$NIC] = $stats.RX
+            $aTX[$NIC] = $stats.TX
             if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Network Stats: $NIC - RX: $($aRX[$NIC]) - TX: $($aTX[$NIC])"}
         }
     } catch {
-        # Ignore any errors for unavailable NICs
         if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Network Error: $NIC"}
     }
 }
@@ -494,30 +536,28 @@ $IPv6 = ""
 $tTIMEDIFF = ([datetime]::UtcNow - $START).TotalSeconds
 # Loop through network interfaces
 foreach ($NIC in $NetworkInterfacesArray) {
-    # Get the latest network stats for the NIC
     try {
-        $adapterStats = Get-NetAdapterStatistics | Where-Object { $_.Name -eq $NIC }
+        $adapterStats = Get-NicBytes -Name $NIC
 
-        if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Network Stats: $NIC - RX: $($adapterStats.ReceivedBytes) - TX: $($adapterStats.SentBytes)"}
+        if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Network Stats: $NIC - RX: $($adapterStats.RX) - TX: $($adapterStats.TX)"}
 
-        # Check if the adapter stats were retrieved successfully
-        if ($adapterStats) {
-            # Calculate Received Traffic
-            $rxDiff = $adapterStats.ReceivedBytes - $aRX[$NIC]
+        if ($adapterStats.RX -ne $null) {
+            $rxDiff = $adapterStats.RX - $aRX[$NIC]
             $RX = [math]::Round($rxDiff / $tTIMEDIFF, 0)
 
-            # Calculate Transferred Traffic
-            $txDiff = $adapterStats.SentBytes - $aTX[$NIC]
+            $txDiff = $adapterStats.TX - $aTX[$NIC]
             $TX = [math]::Round($txDiff / $tTIMEDIFF, 0)
 
             # Add the RX and TX values to the string
             $NICS += "$NIC,$RX,$TX;"
 
             # Individual NIC IP addresses
-            $ipv4Addresses = (Get-NetIPAddress -InterfaceAlias $NIC -AddressFamily IPv4).IPAddress -join ","
+            $ipv4Addresses = (Get-NetIPAddress -InterfaceAlias $NIC -AddressFamily IPv4 | Where-Object {
+                ($_ -ne $null) -and ($_ -match '^(?!10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.)')
+            }).IPAddress -join ","
             if (Get-NetAdapter -Name $NIC -ErrorAction SilentlyContinue) {
                 $ipv6Addresses = (Get-NetIPAddress -InterfaceAlias $NIC -AddressFamily IPv6 -ErrorAction SilentlyContinue | Where-Object {
-                    $_.IPAddress -notmatch '^fe80::'
+                    ($_ -ne $null) -and ($_.IPAddress -notmatch '^(fe80::|fd00::|fc00::)')
                 }).IPAddress -join ","
                 if (!$ipv6Addresses) {
                     $ipv6Addresses = ""
