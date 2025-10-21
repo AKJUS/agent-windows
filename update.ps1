@@ -28,7 +28,7 @@ $branchCheckUrl = "https://raw.githubusercontent.com/hetrixtools/agent-windows/$
 try {
     $request = Invoke-WebRequest -Uri $branchCheckUrl -Method Head -UseBasicParsing -ErrorAction Stop
 } catch {
-    Write-Host "Branch '$BRANCH' does not exist in the remote repository. Please specify a valid branch name."
+    Write-Host "Error: Branch $BRANCH does not exist."
     exit 1
 }
 
@@ -37,14 +37,14 @@ $is64BitOS = ([Environment]::Is64BitOperatingSystem)
 # Check if the current PowerShell process is 32-bit
 $is32BitProcess = -not ([Environment]::Is64BitProcess)
 if ($is64BitOS -and $is32BitProcess) {
-    Write-Host "Please run this script in a 64-bit PowerShell session."
+    Write-Host "Error: Please run this script in a 64-bit PowerShell session."
     exit 1
 }
 
 # Check if the script is running with elevated privileges
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
 if (-not $isAdmin) {
-    Write-Host "Please run this script as an Administrator."
+    Write-Host "Error: Please run this script as an Administrator."
     exit 1
 }
 
@@ -59,14 +59,14 @@ if ([System.Environment]::OSVersion.Version.Build -lt 17763 -and [Net.ServicePoi
 $folderPath = "C:\Program Files\HetrixTools"
 # Check if the folder exists
 if (-not (Test-Path $folderPath)) {
-    Write-Host "Installation folder not found. Please run the installation script first."
+    Write-Host "Error: Installation folder not found. Please run the installation script first."
     exit 1
 }
 
 # Load configuration file
 $ConfigFile = "$folderPath\hetrixtools.cfg"
 if (-not (Test-Path $ConfigFile)) {
-    Write-Host "Configuration file not found. Please run the installation script first."
+    Write-Host "Error: Configuration file not found. Please run the installation script first."
     exit 1
 }
 
@@ -118,12 +118,12 @@ try {
     $wc.DownloadFile("https://raw.githubusercontent.com/hetrixtools/agent-windows/$BRANCH/hetrixtools_agent.ps1", "$folderPath\hetrixtools_agent.ps1")
     Write-Host "... done."
     if ((Get-Item "$folderPath\hetrixtools_agent.ps1").Length -eq 0) {
-        Write-Host "Downloaded agent script is empty. Please check your network connection and branch name."
+        Write-Host "Error: Downloaded agent script is empty. Please check your network connection and branch name."
         $wc.Dispose()
         exit 1
     }
 } catch {
-    Write-Host "Failed to download the agent script. Please check your network connection and branch name."
+    Write-Host "Error: Failed to download the agent script. Please check your network connection and branch name."
     $wc.Dispose()
     exit 1
 }
@@ -132,12 +132,12 @@ try {
     $wc.DownloadFile("https://raw.githubusercontent.com/hetrixtools/agent-windows/$BRANCH/hetrixtools.cfg", "$folderPath\hetrixtools.cfg")
     Write-Host "... done."
     if ((Get-Item "$folderPath\hetrixtools.cfg").Length -eq 0) {
-        Write-Host "Downloaded config file is empty. Please check your network connection and branch name."
+        Write-Host "Error: Downloaded config file is empty. Please check your network connection and branch name."
         $wc.Dispose()
         exit 1
     }
 } catch {
-    Write-Host "Failed to download the config file. Please check your network connection and branch name."
+    Write-Host "Error: Failed to download the config file. Please check your network connection and branch name."
     $wc.Dispose()
     exit 1
 }
@@ -183,7 +183,7 @@ if ($existingTask) {
                 }
             }
         } catch {
-            Write-Host "Error accessing command line for process $($process.Id)."
+            Write-Host "Unable to access command line for process $($process.Id)."
         }
     }
     Write-Host "Deleting the existing scheduled task..."
