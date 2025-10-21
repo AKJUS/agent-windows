@@ -27,14 +27,14 @@ $is64BitOS = ([Environment]::Is64BitOperatingSystem)
 # Check if the current PowerShell process is 32-bit
 $is32BitProcess = -not ([Environment]::Is64BitProcess)
 if ($is64BitOS -and $is32BitProcess) {
-    Write-Host "Please run this script in a 64-bit PowerShell session."
+    Write-Host "Error: Please run this script in a 64-bit PowerShell session."
     exit
 }
 
 # Check if the script is running with elevated privileges
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
 if (-not $isAdmin) {
-    Write-Host "Please run this script as an Administrator."
+    Write-Host "Error: Please run this script as an Administrator."
     exit
 }
 
@@ -76,12 +76,79 @@ if ($processes) {
 }
 Write-Host "... done."
 
-# Get the Server ID
-$SID = $args[0]
+# Determine the branch/version and parse installation arguments
+$argIndex = 0
+if ($args.Count -eq 0) {
+    Write-Host "Error: No installation arguments provided."
+    exit
+}
 
-# Make sure the SID is not empty
+$potentialBranch = $args[$argIndex]
+$potentialBranchTrimmed = if ($null -ne $potentialBranch) { $potentialBranch.Trim() } else { "" }
+if (-not [string]::IsNullOrWhiteSpace($potentialBranchTrimmed) -and $potentialBranchTrimmed.Length -ne 32) {
+    $BRANCH = $potentialBranchTrimmed
+    $argIndex++
+    Write-Host "Installing from $BRANCH branch..."
+}
+
+# Check if the selected branch exists
+Write-Host "Checking if the selected branch exists..."
+$branchCheckUrl = "https://raw.githubusercontent.com/hetrixtools/agent-windows/$BRANCH/hetrixtools_agent.ps1"
+try {
+    $branchRequest = [System.Net.WebRequest]::Create($branchCheckUrl)
+    $branchRequest.Method = "HEAD"
+    $branchRequest.Timeout = 15000
+    $branchResponse = $branchRequest.GetResponse()
+    $branchResponse.Close()
+    Write-Host "... done."
+} catch {
+    Write-Host "Error: Branch '$BRANCH' does not exist in the remote repository. Please specify a valid branch name."
+    exit 1
+}
+
+if ($args.Count -le $argIndex) {
+    Write-Host "Error: Server ID is missing."
+    exit
+}
+
+$SID = $args[$argIndex].Trim()
+$argIndex++
+
+$servicesArgument = "0"
+if ($args.Count -gt $argIndex) {
+    $servicesValue = $args[$argIndex]
+    if ($null -ne $servicesValue) {
+        $servicesArgument = $servicesValue.Trim()
+    } else {
+        $servicesArgument = ""
+    }
+    $argIndex++
+}
+
+$driveHealthArgument = "0"
+if ($args.Count -gt $argIndex) {
+    $driveValue = $args[$argIndex]
+    if ($null -ne $driveValue) {
+        $driveHealthArgument = $driveValue.Trim()
+    } else {
+        $driveHealthArgument = ""
+    }
+    $argIndex++
+}
+
+$portsArgument = "0"
+if ($args.Count -gt $argIndex) {
+    $portsValue = $args[$argIndex]
+    if ($null -ne $portsValue) {
+        $portsArgument = $portsValue.Trim()
+    } else {
+        $portsArgument = ""
+    }
+    $argIndex++
+}
+
 Write-Host "Checking Server ID (SID)..."
-if ($SID -eq "") {
+if ([string]::IsNullOrWhiteSpace($SID)) {
     Write-Host "Error: Server ID is empty."
     exit
 }
@@ -122,21 +189,32 @@ Write-Host "Inserting the Server ID into the config file..."
 
 # Check if any processes/services need to be monitored
 Write-Host "Checking if any processes/services need to be monitored..."
-if ($args[1] -ne "0") {
+if (-not [string]::IsNullOrWhiteSpace($servicesArgument) -and $servicesArgument -ne "0") {
     # Insert the processes/services into the config file
     Write-Host "Inserting the processes/services into the config file..."
     # Split the string into an array and filter out empty elements
-    $processesString = ($args[1].Split(",") | Where-Object { $_.Trim() -ne "" }) -join ","
+    $processesString = ($servicesArgument.Split(",") | Where-Object { $_.Trim() -ne "" }) -join ","
     (Get-Content "$folderPath\hetrixtools.cfg") | ForEach-Object { $_ -replace "CheckServices=", "CheckServices=$processesString" } | Set-Content "$folderPath\hetrixtools.cfg"
 }
 Write-Host "... done."
 
 # Check if Drive Health Monitoring is enabled
 Write-Host "Checking if Drive Health Monitoring is enabled..."
-if ($args[2] -eq "1") {
+if ($driveHealthArgument -eq "1") {
     # Insert the Drive Health Monitoring into the config file
     Write-Host "Inserting the Drive Health Monitoring into the config file..."
     (Get-Content "$folderPath\hetrixtools.cfg") | ForEach-Object { $_ -replace "CheckDriveHealth=0", "CheckDriveHealth=1" } | Set-Content "$folderPath\hetrixtools.cfg"
+}
+Write-Host "... done."
+
+# Check if any port connections need to be monitored
+Write-Host "Checking if any connection ports need to be monitored..."
+if (-not [string]::IsNullOrWhiteSpace($portsArgument) -and $portsArgument -ne "0") {
+    Write-Host "Inserting the connection ports into the config file..."
+    $portsString = ($portsArgument.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }) -join ","
+    if ($portsString) {
+        (Get-Content "$folderPath\hetrixtools.cfg") | ForEach-Object { $_ -replace "ConnectionPorts=", "ConnectionPorts=$portsString" } | Set-Content "$folderPath\hetrixtools.cfg"
+    }
 }
 Write-Host "... done."
 
@@ -166,7 +244,7 @@ if ($existingTask) {
                 }
             }
         } catch {
-            Write-Host "Error accessing command line for process $($process.Id)."
+            Write-Host "Unable to access command line for process $($process.Id)."
         }
     }
     Write-Host "Deleting the existing scheduled task..."

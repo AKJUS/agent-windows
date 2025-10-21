@@ -20,7 +20,7 @@
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Agent Version (do not change)
-$Version = "2.0.8"
+$Version = "2.1.0"
 
 # Load configuration file
 $ConfigFile = "$ScriptPath\hetrixtools.cfg"
@@ -34,16 +34,25 @@ $ScriptStartTime = Get-Date -Format '[yyyy-MM-dd HH:mm:ss]'
 # Function to parse the configuration file
 function Get-ConfigValue {
     param (
-        [string]$Key
+        [Parameter(Mandatory=$true)]
+        [string]$Key,
+        [string]$DefaultValue = $null,
+        [switch]$Required
     )
     
-    # Read the file and find the line containing the key
-    $line = Get-Content $ConfigFile | Where-Object { $_ -match "^$Key=" }
+    # Match the key at the start of the line while allowing optional whitespace around '='
+    $line = Get-Content $ConfigFile | Where-Object { $_ -match "^\s*$Key\s*=" }
     if ($line) {
-        return $line.Split('=')[1].Trim().Trim('"', "'")
-    } else {
+        $parts = $line.Split('=', 2)
+        if ($parts.Count -gt 1) {
+            return $parts[1].Trim().Trim('"', "'")
+        }
+    }
+    if ($Required.IsPresent) {
+        Write-Error "Required config key '$Key' not found in $ConfigFile"
         exit 1
     }
+    return $DefaultValue
 }
 
 # Function to encode a string to base64
@@ -208,13 +217,133 @@ function Get-NicBytes {
     return [pscustomobject]@{ RX = $null; TX = $null }
 }
 
+function Test-IsNonLoopbackAddress {
+    param(
+        [string]$Address
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Address)) {
+        return $false
+    }
+
+    $normalized = $Address.Trim().Trim('[', ']')
+
+    if ($normalized -match '^(127\.)') {
+        return $false
+    }
+    if ($normalized -match '^(::1|::ffff:127\.|0:0:0:0:0:0:0:1)$') {
+        return $false
+    }
+    if ($normalized -match '^fe80:') {
+        return $false
+    }
+
+    return $true
+}
+
+function Get-ListeningPorts {
+    param(
+        [int]$MaxPorts = 30
+    )
+
+    $ports = [System.Collections.Generic.HashSet[int]]::new()
+
+    try {
+        $listeners = Get-NetTCPConnection -State Listen -WarningAction SilentlyContinue
+        foreach ($listener in $listeners) {
+            if ($listener.LocalPort -eq $null) { continue }
+            if (-not (Test-IsNonLoopbackAddress -Address $listener.LocalAddress)) { continue }
+            [void]$ports.Add([int]$listener.LocalPort)
+        }
+    } catch {
+        try {
+            $netstatOutput = netstat -an | Select-String -Pattern 'LISTENING'
+            foreach ($line in $netstatOutput) {
+                if ($line.Line -match '^\s*TCP\s+(\S+):(\d+)\s+\S+\s+LISTENING') {
+                    $address = $matches[1]
+                    $port = [int]$matches[2]
+                    if (-not (Test-IsNonLoopbackAddress -Address $address)) { continue }
+                    [void]$ports.Add($port)
+                }
+            }
+        } catch {
+            if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Failed to auto-detect listening ports: $($_.Exception.Message)"}
+        }
+    }
+
+    $sorted = @()
+    foreach ($port in $ports) {
+        $sorted += $port
+    }
+    if ($sorted.Count -gt 0) {
+        $sorted = $sorted | Sort-Object
+        $sorted = @($sorted)
+    }
+    if ($sorted.Count -gt $MaxPorts) {
+        $sorted = $sorted[0..($MaxPorts - 1)]
+    }
+
+    return $sorted
+}
+
+function Get-PortConnectionSample {
+    param(
+        [int[]]$Ports
+    )
+
+    $result = @{}
+    if (-not $Ports -or $Ports.Count -eq 0) {
+        return $result
+    }
+
+    foreach ($port in $Ports) {
+        $result["$port"] = 0
+    }
+
+    $targetSet = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($port in $Ports) {
+        [void]$targetSet.Add($port)
+    }
+
+    try {
+        $connections = Get-NetTCPConnection -State Established -WarningAction SilentlyContinue
+        foreach ($conn in $connections) {
+            if ($conn.LocalPort -eq $null) { continue }
+            $localPort = [int]$conn.LocalPort
+            if (-not $targetSet.Contains($localPort)) { continue }
+            if (-not (Test-IsNonLoopbackAddress -Address $conn.LocalAddress)) { continue }
+            $key = "$localPort"
+            $result[$key]++
+        }
+    } catch {
+        try {
+            $netstatLines = netstat -an | Select-String -Pattern 'ESTABLISHED'
+            foreach ($line in $netstatLines) {
+                if ($line.Line -match '^\s*TCP\s+(\S+):(\d+)\s+(\S+):(\d+)\s+ESTABLISHED') {
+                    $address = $matches[1]
+                    $port = [int]$matches[2]
+                    if (-not $targetSet.Contains($port)) { continue }
+                    if (-not (Test-IsNonLoopbackAddress -Address $address)) { continue }
+                    $key = "$port"
+                    $result[$key]++
+                }
+            }
+        } catch {
+            if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Failed to sample port connections: $($_.Exception.Message)"}
+        }
+    }
+
+    return $result
+}
+
 # Configs
-$SID = Get-ConfigValue -Key "SID"
-$CollectEveryXSeconds = Get-ConfigValue -Key "CollectEveryXSeconds"
-$NetworkInterfaces = Get-ConfigValue -Key "NetworkInterfaces"
-$CheckServices = Get-ConfigValue -Key "CheckServices"
-$CheckDriveHealth = Get-ConfigValue -Key "CheckDriveHealth"
-$DEBUG = Get-ConfigValue -Key "DEBUG"
+$SID = Get-ConfigValue -Key "SID" -Required
+$CollectEveryXSeconds = Get-ConfigValue -Key "CollectEveryXSeconds" -DefaultValue "3"
+$NetworkInterfaces = Get-ConfigValue -Key "NetworkInterfaces" -DefaultValue ""
+$CheckServices = Get-ConfigValue -Key "CheckServices" -DefaultValue ""
+$ConnectionPorts = Get-ConfigValue -Key "ConnectionPorts" -DefaultValue ""
+$CheckDriveHealth = Get-ConfigValue -Key "CheckDriveHealth" -DefaultValue "0"
+$DEBUG = Get-ConfigValue -Key "DEBUG" -DefaultValue "0"
 
 if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Starting HetrixTools Agent v$Version"}
 
@@ -266,6 +395,38 @@ if (-not [string]::IsNullOrEmpty($NetworkInterfaces)) {
 }
 
 if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Network Interfaces: $($NetworkInterfacesArray -join ', ')"}
+
+# Connection ports
+$ConnectionPortsArray = @()
+[int[]]$ConnectionPortsInt = @()
+$Connections = @{}
+$PortSampleCount = 0
+
+if (-not [string]::IsNullOrWhiteSpace($ConnectionPorts)) {
+    $ConnectionPortsArray = $ConnectionPorts -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+$' }
+    if ($ConnectionPortsArray.Count -gt 0) {
+        if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Using configured connection ports: $($ConnectionPortsArray -join ', ')"} 
+    } elseif ($DEBUG -eq "1") {
+        Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') No valid ports found in ConnectionPorts setting"
+    }
+} else {
+    $autoPorts = Get-ListeningPorts
+    if ($autoPorts.Count -gt 0) {
+        $ConnectionPortsArray = $autoPorts | ForEach-Object { "$_" }
+        if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Auto detected connection ports: $($ConnectionPortsArray -join ', ')"}
+    } elseif ($DEBUG -eq "1") {
+        Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') No external connection ports detected"
+    }
+}
+
+if ($ConnectionPortsArray.Count -gt 0) {
+    $ConnectionPortsInt = $ConnectionPortsArray | ForEach-Object { [int]$_ }
+    foreach ($port in $ConnectionPortsArray) {
+        $Connections[$port] = 0
+    }
+} elseif ($DEBUG -eq "1") {
+    Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Port connection monitoring disabled (no ports configured or detected)"
+}
 
 # Initial network usage
 $aRX = @{}
@@ -344,6 +505,23 @@ for ($X = 1; $X -le $RunTimes; $X++) {
     # Add up the results
     $total_cpuUsage += [math]::Round($cpuUsage, 2)
     $total_diskTime += [math]::Round($diskTime, 2)
+
+    if ($ConnectionPortsInt.Count -gt 0) {
+        $connectionSample = Get-PortConnectionSample -Ports $ConnectionPortsInt
+        foreach ($port in $ConnectionPortsArray) {
+            if ($connectionSample.ContainsKey($port)) {
+                $Connections[$port] += $connectionSample[$port]
+            }
+        }
+        $PortSampleCount++
+        if ($DEBUG -eq "1") {
+            $sampleDebug = ($ConnectionPortsArray | ForEach-Object {
+                $value = if ($connectionSample.ContainsKey($_)) { $connectionSample[$_] } else { 0 }
+                "$_,$value"
+            }) -join ';'
+            Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Port sample: $sampleDebug"
+        }
+    }
 
     # Check if the minute has changed, so we can end the loop
     $MM = [int](Get-Date -Format 'mm')
@@ -578,6 +756,20 @@ $NICS = Encode-Base64 -InputString $NICS
 $IPv4 = Encode-Base64 -InputString $IPv4
 $IPv6 = Encode-Base64 -InputString $IPv6
 
+$CONN = ""
+if ($ConnectionPortsArray.Count -gt 0) {
+    foreach ($port in $ConnectionPortsArray) {
+        $average = if ($PortSampleCount -gt 0) {
+            [math]::Round($Connections[$port] / $PortSampleCount, 0)
+        } else {
+            0
+        }
+        $CONN += "$port,$average;"
+    }
+    if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Port connections: $CONN"}
+    $CONN = Encode-Base64 -InputString $CONN
+}
+
 # Check processes/services
 $SRVCS = ""
 if (-not [string]::IsNullOrEmpty($CheckServices)) {
@@ -624,6 +816,7 @@ $Data = [PSCustomObject]@{
     nics = $NICS
     ipv4 = $IPv4
     ipv6 = $IPv6
+    conn = $CONN
     serv = $SRVCS
     dh = $DH
 }
