@@ -20,7 +20,7 @@
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Agent Version (do not change)
-$Version = "2.1.0"
+$Version = "2.1.1"
 
 # Load configuration file
 $ConfigFile = "$ScriptPath\hetrixtools.cfg"
@@ -827,9 +827,8 @@ if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-
 
 # Send the data
 $APIURL = "https://sm.hetrixtools.net/win/"
-$Headers = @{
-    'Content-Type' = 'application/json'
-}
+$Headers = @{}
+$ContentType = 'application/json; charset=utf-8'
 $MaxRetries = 3
 $Timeout = 15
 $RetryCount = 0
@@ -837,7 +836,7 @@ $Success = $false
 while ($RetryCount -lt $MaxRetries -and -not $Success) {
     try {
         $startTime = Get-Date
-        $Response = Invoke-RestMethod -Uri $APIURL -Method Post -Headers $Headers -Body $Data -TimeoutSec $Timeout
+        $Response = Invoke-RestMethod -Uri $APIURL -Method Post -Headers $Headers -ContentType $ContentType -Body $Data -TimeoutSec $Timeout -ErrorAction Stop
         $endTime = Get-Date
         $responseTime = [math]::Round(($endTime - $startTime).TotalMilliseconds, 0)
         if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Response: $Response | Status: 200 | Time: ${responseTime}ms"}

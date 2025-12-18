@@ -4,6 +4,9 @@ Documentation available here: https://docs.hetrixtools.com/category/server-monit
 
 ### Changelog
 
+#### Version 2.1.1: 
+- Fixed header connection issues.
+
 #### Version 2.1.0: 
 - Added the Port Connection Monitoring feature.
 - Added the ability to automatically detect active ports, unless specified in the `hetrixtools.cfg` file.
