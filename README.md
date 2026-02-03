@@ -4,6 +4,9 @@ Documentation available here: https://docs.hetrixtools.com/category/server-monit
 
 ### Changelog
 
+#### Version 2.1.2: 
+- Added the OutgoingPing feature.
+
 #### Version 2.1.1: 
 - Fixed header connection issues.
 
