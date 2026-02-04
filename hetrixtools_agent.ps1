@@ -1,6 +1,6 @@
 #
 #	HetrixTools Server Monitoring Agent
-#	Copyright 2015 - 2025 @  HetrixTools
+#	Copyright 2015 - 2026 @  HetrixTools
 #	For support, please open a ticket on our website https://hetrixtools.com
 #
 #
@@ -20,7 +20,7 @@
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Agent Version (do not change)
-$Version = "2.1.1"
+$Version = "2.1.2"
 
 # Load configuration file
 $ConfigFile = "$ScriptPath\hetrixtools.cfg"
@@ -343,7 +343,10 @@ $NetworkInterfaces = Get-ConfigValue -Key "NetworkInterfaces" -DefaultValue ""
 $CheckServices = Get-ConfigValue -Key "CheckServices" -DefaultValue ""
 $ConnectionPorts = Get-ConfigValue -Key "ConnectionPorts" -DefaultValue ""
 $CheckDriveHealth = Get-ConfigValue -Key "CheckDriveHealth" -DefaultValue "0"
+$OutgoingPings = Get-ConfigValue -Key "OutgoingPings" -DefaultValue ""
+$OutgoingPingsCount = Get-ConfigValue -Key "OutgoingPingsCount" -DefaultValue "20"
 $DEBUG = Get-ConfigValue -Key "DEBUG" -DefaultValue "0"
+$PingJobs = @()
 
 if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Starting HetrixTools Agent v$Version"}
 
@@ -371,6 +374,102 @@ if ((Get-Date).Hour -eq 0 -and (Get-Date).Minute -eq 0) {
     if (Test-Path $debugLog) {
         Remove-Item -Path $debugLog -Force
         if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Debug log cleared."}
+    }
+}
+
+# Outgoing PING
+if (-not [string]::IsNullOrEmpty($OutgoingPings)) {
+    if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') OutgoingPings: $OutgoingPings"}
+
+    $pingJobScript = {
+        param(
+            [string]$TargetName,
+            [string]$PingTarget,
+            [string]$OutgoingPingsCount,
+            [string]$ScriptPath,
+            [string]$Debug,
+            [string]$DebugLog,
+            [string]$ScriptStartTime
+        )
+
+        function Write-PingDebug {
+            param([string]$Message)
+            if ($Debug -eq "1") {
+                Add-Content -Path $DebugLog -Value "$ScriptStartTime-$((Get-Date -Format '[yyyy-MM-dd HH:mm:ss]')) $Message"
+            }
+        }
+
+        if ($TargetName -notmatch '^[A-Za-z0-9._-]+$') { Write-PingDebug "Invalid PING target name value"; return }
+        if ($PingTarget -notmatch '^[A-Za-z0-9.:_-]+$') { Write-PingDebug "Invalid PING target value"; return }
+        if ($OutgoingPingsCount -notmatch '^\d+$') { Write-PingDebug "Invalid PING count value"; return }
+        $count = [int]$OutgoingPingsCount
+        if ($count -lt 10 -or $count -gt 40) { Write-PingDebug "Invalid PING count value"; return }
+
+        $pingExe = Join-Path $env:SystemRoot 'System32\ping.exe'
+        if (-not (Test-Path $pingExe)) { $pingExe = 'ping.exe' }
+        Write-PingDebug "PING_CMD: $pingExe $PingTarget -n $count -w 1000"
+        $pingOutput = & $pingExe $PingTarget -n $count -w 1000 2>&1
+        $pingExitCode = $LASTEXITCODE
+        Write-PingDebug "PING_EXIT: $pingExitCode"
+
+        if ($Debug -eq "1") {
+            $pingOutputText = if ($pingOutput) { $pingOutput -join "`n" } else { "" }
+            Add-Content -Path $DebugLog -Value "$ScriptStartTime-$((Get-Date -Format '[yyyy-MM-dd HH:mm:ss]')) PING_OUTPUT:`n$pingOutputText"
+        }
+
+        $packetLoss = $null
+        if ($pingOutput) {
+            foreach ($line in $pingOutput) {
+                if ($line -match '\((\d+)%') {
+                    $packetLoss = $matches[1]
+                    break
+                }
+            }
+        }
+        if ([string]::IsNullOrEmpty($packetLoss)) { Write-PingDebug "Unable to extract packet loss"; return }
+
+        $avgRtt = 0
+        if ($pingOutput) {
+            foreach ($line in $pingOutput) {
+                if ($line -match 'Average\s*=\s*(\d+)ms') {
+                    $avgRtt = [int]$matches[1] * 1000
+                    break
+                }
+            }
+        }
+
+        Write-PingDebug "PACKET_LOSS: $packetLoss"
+        Write-PingDebug "AVG_RTT: $avgRtt"
+
+        $pingLine = "$TargetName,$PingTarget,$packetLoss,$avgRtt;"
+        $pingFile = Join-Path $ScriptPath 'ping.txt'
+        $written = $false
+        for ($i = 0; $i -lt 5 -and -not $written; $i++) {
+            try {
+                Add-Content -Path $pingFile -Value $pingLine
+                $written = $true
+            } catch {
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        if (-not $written) { Write-PingDebug "Failed to append ping result to ping.txt" }
+    }
+
+    $OutgoingPingsArray = $OutgoingPings -split '\|'
+    foreach ($entry in $OutgoingPingsArray) {
+        if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+        $parts = $entry -split ',', 2
+        if ($parts.Count -lt 2) { continue }
+        $targetName = $parts[0].Trim()
+        $pingTarget = $parts[1].Trim()
+        if ([string]::IsNullOrWhiteSpace($targetName) -or [string]::IsNullOrWhiteSpace($pingTarget)) { continue }
+        try {
+            $job = Start-Job -ScriptBlock $pingJobScript -ArgumentList $targetName, $pingTarget, $OutgoingPingsCount, $ScriptPath, $DEBUG, $debugLog, $ScriptStartTime
+            $PingJobs += $job
+            if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Started PING job ID $($job.Id) for $targetName ($pingTarget)"}
+        } catch {
+            if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Failed to start PING job for $targetName ($pingTarget): $($_.Exception.Message)"}
+        }
     }
 }
 
@@ -791,6 +890,49 @@ if (-not [string]::IsNullOrEmpty($CheckServices)) {
 if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Services: $SRVCS"}
 $SRVCS = Encode-Base64 -InputString $SRVCS
 
+# Wait for Outgoing PING jobs to complete (best effort)
+if ($PingJobs.Count -gt 0) {
+    $pingTimeout = 30
+    if ($OutgoingPingsCount -match '^\d+$') {
+        $countForTimeout = [int]$OutgoingPingsCount
+        if ($countForTimeout -gt 0) {
+            $pingTimeout = [math]::Min(60, $countForTimeout + 10)
+        }
+    }
+    if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Waiting for PING jobs (timeout ${pingTimeout}s)"}
+    Wait-Job -Job $PingJobs -Timeout $pingTimeout | Out-Null
+    foreach ($job in $PingJobs) {
+        if ($job.State -eq 'Running') {
+            if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') PING job $($job.Id) timed out"}
+            Stop-Job -Job $job -Force -ErrorAction SilentlyContinue
+        }
+        Receive-Job -Job $job -ErrorAction SilentlyContinue | Out-Null
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Outgoing PING
+$OPING = ""
+if (-not [string]::IsNullOrEmpty($OutgoingPings)) {
+    $pingFile = Join-Path $ScriptPath 'ping.txt'
+    if (Test-Path $pingFile) {
+        try {
+            $pingLines = Get-Content -Path $pingFile -ErrorAction Stop | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            if ($pingLines.Count -gt 0) {
+                $pingJoined = $pingLines -join ''
+                $OPING = Encode-Base64 -InputString $pingJoined
+            }
+        } catch {
+            if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') Failed to read ping.txt: $($_.Exception.Message)"}
+        } finally {
+            Remove-Item -Path $pingFile -Force -ErrorAction SilentlyContinue
+        }
+    } elseif ($DEBUG -eq "1") {
+        Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') ping.txt not found"
+    }
+}
+if ($DEBUG -eq "1") {Add-Content -Path $debugLog -Value "$ScriptStartTime-$(Get-Date -Format '[yyyy-MM-dd HH:mm:ss]') OPING: $OPING"}
+
 # Create a custom object with all the data
 $Data = [PSCustomObject]@{
     version = $Version
@@ -818,6 +960,7 @@ $Data = [PSCustomObject]@{
     ipv6 = $IPv6
     conn = $CONN
     serv = $SRVCS
+    oping = $OPING
     dh = $DH
 }
 
@@ -858,3 +1001,4 @@ while ($RetryCount -lt $MaxRetries -and -not $Success) {
         }
     }
 }
+
