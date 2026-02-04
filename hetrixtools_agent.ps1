@@ -1,6 +1,6 @@
 #
 #	HetrixTools Server Monitoring Agent
-#	Copyright 2015 - 2025 @  HetrixTools
+#	Copyright 2015 - 2026 @  HetrixTools
 #	For support, please open a ticket on our website https://hetrixtools.com
 #
 #
@@ -18,7 +18,6 @@
 
 # Script path
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ScriptFile = $MyInvocation.MyCommand.Path
 
 # Agent Version (do not change)
 $Version = "2.1.2"
@@ -1002,3 +1001,4 @@ while ($RetryCount -lt $MaxRetries -and -not $Success) {
         }
     }
 }
+
